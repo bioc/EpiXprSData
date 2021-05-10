@@ -137,7 +137,7 @@ meta <- data.frame(
                            "consisting of models for 23,813 genes"),
                     paste0("European American specific models developed on TCGA-HNSC cohort",
                            "consisting of models for 21,496 genes")),
-    BiocVersion = "4.0",
+    BiocVersion = "3.13",
     Genome = rep("hg38", 46),
     SourceType = rep("RDA", 46),
     SourceVersion = "Apr 27 2021",
