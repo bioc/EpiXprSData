@@ -1,0 +1,846 @@
+library(reticulate)
+
+library(Signac)
+library(Seurat)
+library(ggplot2)
+library(EnsDb.Mmusculus.v79)
+library(BSgenome.Mmusculus.UCSC.mm10)
+library(cowplot)
+library(dplyr)
+library(GenomicRanges)
+library(future)
+set.seed(1234)
+setwd('/home/ianl/S_Benitz_Results/')
+dir.create('Combined')
+setwd('Combined')
+
+plan("multiprocess", workers = 4)
+options(future.globals.maxSize = 50000 * 1024^2) # for 50 Gb RAM
+
+peaks.WT <- read.table(
+    file = "/share/data/S_Benitz_Data/Illumina_NovaZ-3_2392-SB/NovaZ-3/2392-SB/Sample_2392-SB-1/outs/atac_peaks.bed",
+    col.names = c("chr", "start", "end")
+)
+peaks.KO <- read.table(
+    file = "/share/data/S_Benitz_Data/Illumina_NovaZ-3_2392-SB/NovaZ-3/2392-SB/Sample_2392-SB-2/outs/atac_peaks.bed",
+    col.names = c("chr", "start", "end")
+)
+
+gr.KO <- makeGRangesFromDataFrame(peaks.KO)
+gr.WT <- makeGRangesFromDataFrame(peaks.WT)
+
+combined.peaks <- reduce(x = c(gr.KO, gr.WT))
+
+# Filter out bad peaks based on length
+peakwidths <- width(combined.peaks)
+combined.peaks <- combined.peaks[peakwidths  < 10000 & peakwidths > 20]
+combined.peaks
+
+md.WT <- read.table(
+    file = "/share/data/S_Benitz_Data/Illumina_NovaZ-3_2392-SB/NovaZ-3/2392-SB/Sample_2392-SB-1/outs/per_barcode_metrics.csv",
+    stringsAsFactors = FALSE,
+    sep = ",",
+    header = TRUE,
+    row.names = 1
+)[-1, ] # remove the first row
+
+md.KO <- read.table(
+    file = "//share/data/S_Benitz_Data/Illumina_NovaZ-3_2392-SB/NovaZ-3/2392-SB/Sample_2392-SB-2/outs/per_barcode_metrics.csv",
+    stringsAsFactors = FALSE,
+    sep = ",",
+    header = TRUE,
+    row.names = 1
+)[-1, ]
+
+
+# create fragment objects
+frags.WT <- CreateFragmentObject(
+    path = "/share/data/S_Benitz_Data/Illumina_NovaZ-3_2392-SB/NovaZ-3/2392-SB/Sample_2392-SB-1/outs/atac_fragments.tsv.gz",
+    cells = rownames(md.WT)
+)
+
+frags.KO <- CreateFragmentObject(
+    path = "/share/data/S_Benitz_Data/Illumina_NovaZ-3_2392-SB/NovaZ-3/2392-SB/Sample_2392-SB-2/outs/atac_fragments.tsv.gz",
+    cells = rownames(md.KO)
+)
+
+
+
+KO.counts <- FeatureMatrix(
+    fragments = frags.KO,
+    features = combined.peaks,
+    cells = rownames(md.KO)
+)
+
+WT.counts <- FeatureMatrix(
+    fragments = frags.WT,
+    features = combined.peaks,
+    cells = rownames(md.WT)
+)
+
+
+WT_assay <- CreateChromatinAssay(WT.counts, fragments = frags.WT)
+WT <- CreateSeuratObject(WT_assay, assay = "ATAC", meta.data = md.WT)
+WT <- subset(WT, subset = is_cell == 1)
+
+KO_assay <- CreateChromatinAssay(KO.counts, fragments = frags.KO)
+KO <- CreateSeuratObject(KO_assay, assay = "ATAC", meta.data = md.KO)
+KO <- subset(KO, subset = is_cell == 1)
+
+
+
+# add information to identify dataset of origin
+KO$dataset <- 'KO'
+WT$dataset <- 'WT'
+
+
+# merge all datasets, adding a cell ID to make sure cell names are unique
+combined <- merge(
+    x = WT,
+    y = list(KO),
+    add.cell.ids = c("WT", "KO")
+)
+combined[["ATAC"]]
+
+
+combined <- RunTFIDF(combined)
+combined <- FindTopFeatures(combined, min.cutoff = 20)
+combined <- RunSVD(combined)
+combined <- RunUMAP(combined, dims = 2:50, reduction = 'lsi')
+
+
+
+png('DimPlot_UMAP_Merged.png', width = 7, height = 7, units = 'in', res = 600)
+DimPlot(combined, group.by = 'dataset', pt.size = 0.1)
+dev.off()
+
+
+annotations <- GetGRangesFromEnsDb(ensdb = EnsDb.Mmusculus.v79)
+
+# change to UCSC style since the data was mapped to hg19
+seqlevelsStyle(annotations) <- 'UCSC'
+genome(annotations) <- "mm10"
+
+# add the gene information to the object
+Annotation(combined) <- annotations
+
+
+# compute nucleosome signal score per cell
+combined <- NucleosomeSignal(object = combined)
+
+# compute TSS enrichment score per cell
+combined <- TSSEnrichment(object = combined, fast = FALSE)
+
+# add blacklist ratio and fraction of reads in peaks
+#combined$pct_reads_in_peaks <- combined$atac_peak_region_fragments / combined$passed_filters * 100
+combined$blacklist_ratio <- combined$atac_fragments / combined$atac_peak_region_fragments
+
+
+
+combined$high.tss <- ifelse(combined$TSS.enrichment > 2, 'High', 'Low')
+png('TSSPlot.png')
+TSSPlot(combined, group.by = 'high.tss') + NoLegend()
+dev.off()
+
+combined$nucleosome_group <- ifelse(combined$nucleosome_signal > 4, 'NS > 4', 'NS < 4')
+FragmentHistogram(object = combined, group.by = 'nucleosome_group')
+
+png('QC_PLot_Before_FIltering.png')
+VlnPlot(
+    object = combined,
+    features = c('pct_reads_in_peaks', 'atac_peak_region_fragments',
+                 'TSS.enrichment', 'blacklist_ratio', 'nucleosome_signal'),
+    pt.size = 0.1,
+    ncol = 2
+)
+dev.off()
+
+combined <- subset(
+    x = combined,
+    subset = atac_peak_region_fragments > 1000 &
+        atac_peak_region_fragments < 20000 &
+        nucleosome_signal < 4 &
+        TSS.enrichment > 2
+)
+combined
+png('QC_PLot_After_FIltering.png')
+VlnPlot(
+    object = combined,
+    features = c('pct_reads_in_peaks', 'atac_peak_region_fragments',
+                 'TSS.enrichment', 'blacklist_ratio', 'nucleosome_signal'),
+    pt.size = 0.1,
+    ncol = 2
+)
+dev.off()
+
+combined <- RunTFIDF(combined)
+combined <- FindTopFeatures(combined, min.cutoff = 'q0')
+combined <- RunSVD(combined)
+
+
+combined <- RunUMAP(object = combined, reduction = 'lsi', dims = 2:30)
+combined <- FindNeighbors(object = combined, reduction = 'lsi', dims = 2:30)
+combined <- FindClusters(object = combined, verbose = FALSE, algorithm = 3, resolution = 0.15)
+
+png('DimPlot_UMAP.png', width = 7, height = 7, units = 'in', res = 600)
+DimPlot(object = combined, label = TRUE) + NoLegend()
+dev.off()
+
+png('DimPlot_UMAP_Merged.png', width = 7, height = 7, units = 'in', res = 600)
+DimPlot(combined, group.by = 'dataset', pt.size = 0.2)
+dev.off()
+
+gene.activities <- GeneActivity(combined)
+# add the gene activity matrix to the Seurat object as a new assay and normalize it
+combined[['RNA']] <- CreateAssayObject(counts = gene.activities)
+combined <- NormalizeData(
+    object = combined,
+    assay = 'RNA',
+    normalization.method = 'LogNormalize',
+    scale.factor = median(combined$nCount_RNA)
+)
+
+DefaultAssay(combined) <- 'RNA'
+all.genes <- rownames(combined)
+combined <- ScaleData(combined, features = all.genes)
+
+combined.markers <- FindAllMarkers(combined, only.pos = FALSE, min.pct = 0.0, log2fc.threshold = 0.1)
+write.table(combined.markers,"combined.markers.markers_all.csv",sep=",")
+
+combined.markers <- FindAllMarkers(combined, only.pos = TRUE, min.pct = 0.0, log2fc.threshold = 0.1)
+write.table(combined.markers,"combined.markers.markers_positive.csv",sep=",")
+
+top10 <-combined.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+write.table(top10, "combined.markers.top10_genes.csv", sep = ',')
+
+top2 <-combined.markers %>% group_by(cluster) %>% top_n(n = 2, wt = avg_log2FC)
+write.table(top2, "combined.markers.top2_genes.csv", sep = ',')
+
+png("DoHeatmap.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+DoHeatmap(object = combined, features = top10$gene)+ theme(axis.text.y = element_text(size = 6))
+dev.off()
+
+
+png("featurePlot_combined_top2genes.png", width = 20, height = 20, units = 'in', res = 600, type = 'cairo')
+FeaturePlot(combined, features = top2$gene, cols = c("antiquewhite2", "darkblue"), reduction = 'umap')
+dev.off()
+
+png("VlnPlot_combined_top2_genes.png", width = 20, height = 20, units = 'in', res = 600, type = 'cairo')
+plot_grid(
+    VlnPlot(combined, features=top2$gene[1],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(combined, features=top2$gene[2],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(combined, features=top2$gene[3],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(combined, features=top2$gene[4],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(combined, features=top2$gene[5],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(combined, features=top2$gene[6],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(combined, features=top2$gene[7],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(combined, features=top2$gene[8],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(combined, features=top2$gene[9],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(combined, features=top2$gene[10],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(combined, features=top2$gene[11],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(combined, features=top2$gene[12],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(combined, features=top2$gene[13],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(combined, features=top2$gene[14],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(combined, features=top2$gene[15],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(combined, features=top2$gene[16],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(combined, features=top2$gene[17],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(combined, features=top2$gene[18],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE)
+    
+    
+    
+)
+dev.off()
+
+
+
+
+gene_list<-top10$gene
+dir.create("./UMAP_plots_top10/")
+for (i in 1:length(gene_list)){
+    file_png_name<-paste("./UMAP_plots_top10/UMAP_",gene_list[i],".png",sep="")
+    fplot<-FeaturePlot(object = combined, features = gene_list[i], cols = c("antiquewhite2", "darkblue"))
+    png(file_png_name, width=4, height=4, units = "in", res = 600, type = 'cairo')
+    print(fplot)
+    dev.off()
+}
+
+
+DefaultAssay(combined) <- 'ATAC'
+png("CoveragePlot_Zeb2.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+CoveragePlot(
+    object = combined,
+    region = 'chr2-44987121-45112985',
+    extend.upstream = 40000,
+    extend.downstream = 20000,
+    features = 'Zeb2'
+)
+dev.off()
+
+
+
+png("CoveragePlot_Cela1.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+CoveragePlot(
+    object = combined,
+    region = 'chr15-100674421-100687921',
+    extend.upstream = 40000,
+    extend.downstream = 20000,
+    features = 'Cela1'
+)
+dev.off()
+
+saveRDS(combined,'Combined_Aciner.RDS')
+
+
+png("CoveragePlot_Dmbt1_cluster_0.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+CoveragePlot(
+    object = combined,
+    region = 'chr7-129764181-132725079',
+    extend.upstream = 40000,
+    extend.downstream = 20000,
+    features = 'Dmbt1'
+)
+dev.off()
+
+
+
+png("CoveragePlot_Fgfr2_cluster_0.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+CoveragePlot(
+    object = combined,
+    region = 'chr7-129764181-132725079',
+    extend.upstream = 40000,
+    extend.downstream = 20000,
+    features = 'Fgfr2'
+)
+dev.off()
+
+png("CoveragePlot_Cela1_cluster_1.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+CoveragePlot(
+    object = combined,
+    region = 'chr15-100674421-100687921',
+    extend.upstream = 40000,
+    extend.downstream = 20000,
+    features = 'Cela1'
+)
+dev.off()
+
+
+
+png("CoveragePlot_Ccbe1_cluster_1.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+CoveragePlot(
+    object = combined,
+    region = 'chr18-66178373-66435812',
+    extend.upstream = 40000,
+    extend.downstream = 20000,
+    features = 'Ccbe1'
+)
+dev.off()
+
+png("CoveragePlot_Gm10800_cluster_2.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+CoveragePlot(
+    object = combined,
+    region = 'chr18-89310548-89787652',
+    extend.upstream = 40000,
+    extend.downstream = 20000,
+    features = 'Gm10800'
+)
+dev.off()
+
+
+
+png("CoveragePlot_Dok6_cluster_2.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+CoveragePlot(
+    object = combined,
+    region = 'chr18-89292424-89769528',
+    extend.upstream = 40000,
+    extend.downstream = 20000,
+    features = 'Dok6'
+)
+dev.off()
+
+
+
+
+png("CoveragePlot_Fgf12_cluster_3.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+CoveragePlot(
+    object = combined,
+    region = 'chr16-28160098-28446277',
+    extend.upstream = 40000,
+    extend.downstream = 20000,
+    features = 'Fgf12'
+)
+dev.off()
+
+png("CoveragePlot_Slc2a2_cluster_3.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+CoveragePlot(
+    object = combined,
+    region = 'chr3-28697903-28731359',
+    extend.upstream = 40000,
+    extend.downstream = 20000,
+    features = 'Slc2a2'
+)
+dev.off()
+
+
+
+png("CoveragePlot_Fbn1_cluster_4.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+CoveragePlot(
+    object = combined,
+    region = 'chr2-125142514-125349913',
+    extend.upstream = 40000,
+    extend.downstream = 20000,
+    features = 'Fbn1'
+)
+dev.off()
+
+
+
+png("CoveragePlot_Lsp1_cluster_4.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+CoveragePlot(
+    object = combined,
+    region = 'chr7-142460809-142494867',
+    extend.upstream = 40000,
+    extend.downstream = 20000,
+    features = 'Lsp1'
+)
+dev.off()
+
+png("CoveragePlot_Sla_cluster_5.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+CoveragePlot(
+    object = combined,
+    region = 'chr15-66652668-66703678',
+    extend.upstream = 40000,
+    extend.downstream = 20000,
+    features = 'Sla'
+)
+dev.off()
+
+
+
+png("CoveragePlot_Inpp5d_cluster_5.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+CoveragePlot(
+    object = combined,
+    region = 'chr1-87620489-87719323',
+    extend.upstream = 40000,
+    extend.downstream = 20000,
+    features = 'Inpp5d'
+)
+dev.off()
+
+
+png("CoveragePlot_Clec14a_cluster_6.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+CoveragePlot(
+    object = combined,
+    region = 'chr12-58311506-58316076',
+    extend.upstream = 40000,
+    extend.downstream = 20000,
+    features = 'Clec14a'
+)
+dev.off()
+
+
+
+png("CoveragePlot_Kdr_cluster_6.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+CoveragePlot(
+    object = combined,
+    region = 'chr5-75932827-75978458',
+    extend.upstream = 40000,
+    extend.downstream = 20000,
+    features = 'Kdr'
+)
+dev.off()
+
+png("CoveragePlot_Slc30a8_cluster_7.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+CoveragePlot(
+    object = combined,
+    region = 'chr15-52295553-52335798',
+    extend.upstream = 40000,
+    extend.downstream = 20000,
+    features = 'Slc30a8'
+)
+dev.off()
+
+
+
+png("CoveragePlot_Scg3_cluster_7.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+CoveragePlot(
+    object = combined,
+    region = 'chr9-75643189-75684056',
+    extend.upstream = 40000,
+    extend.downstream = 20000,
+    features = 'Scg3'
+)
+dev.off()
+
+png("CoveragePlot_Gjb4_cluster_8.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+CoveragePlot(
+    object = combined,
+    region = 'chr4-127351086-127354081',
+    extend.upstream = 40000,
+    extend.downstream = 20000,
+    features = 'Gjb4'
+)
+dev.off()
+
+
+
+png("CoveragePlot_Msln_cluster_8.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+CoveragePlot(
+    object = combined,
+    region = 'chr17-25748613-25754378',
+    extend.upstream = 40000,
+    extend.downstream = 20000,
+    features = 'Msln'
+)
+dev.off()
+
+png("CoveragePlot_Il1rn_cluster_9.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+CoveragePlot(
+    object = combined,
+    region = 'chr2-24336853-24351494',
+    extend.upstream = 40000,
+    extend.downstream = 20000,
+    features = 'Il1rn'
+)
+dev.off()
+
+
+
+png("CoveragePlot_Barx2_cluster_9.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+CoveragePlot(
+    object = combined,
+    region = 'chr9-31846044-31913462',
+    extend.upstream = 40000,
+    extend.downstream = 20000,
+    features = 'Barx2'
+)
+dev.off()
+
+
+
+
+png("CoveragePlot_Ror2.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+CoveragePlot(
+    object = combined,
+    region = 'chr13-53163348-53440160',
+    extend.upstream = 40000,
+    extend.downstream = 20000,
+    features = 'Ror2'
+)
+dev.off()
+
+
+
+#####Cluster 0 vs CLuster 1
+combined.markers <- FindMarkers(combined, ident.1 = "1", ident.2 = "0", only.pos = FALSE, min.pct = 0.0, log2fc.threshold = 0.1)
+write.table(combined.markers,"1VS0.markers.markers_all.csv",sep=",")
+
+combined.markers <- FindMarkers(combined, ident.1 = "1", ident.2 = "0", only.pos = TRUE, min.pct = 0.0, log2fc.threshold = 0.1)
+write.table(combined.markers,"1VS0.markers.markers_positive.csv",sep=",")
+
+top10 <-combined.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+write.table(top10, "0VS1.markers.top10_genes.csv", sep = ',')
+
+top2 <-combined.markers %>% group_by(cluster) %>% top_n(n = 2, wt = avg_log2FC)
+write.table(top2, "0VS1.markers.top2_genes.csv", sep = ',')
+
+
+
+
+#####Cluster 3 vs CLuster 9
+combined.markers <- FindMarkers(combined, ident.1 = "3", ident.2 = "9", only.pos = FALSE, min.pct = 0.0, log2fc.threshold = 0.1)
+write.table(combined.markers,"3VS9.markers.markers_all.csv",sep=",")
+
+combined.markers <- FindMarkers(combined, ident.1 = "3", ident.2 = "9", only.pos = TRUE, min.pct = 0.0, log2fc.threshold = 0.1)
+write.table(combined.markers,"3VS9.markers.markers_positive.csv",sep=",")
+
+top10 <-combined.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+write.table(top10, "3VS9.markers.top10_genes.csv", sep = ',')
+
+top2 <-combined.markers %>% group_by(cluster) %>% top_n(n = 2, wt = avg_log2FC)
+write.table(top2, "3VS9.markers.top2_genes.csv", sep = ',')
+
+
+
+#### More coverage Plots
+
+
+png("CoveragePlot_Elk3.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+CoveragePlot(
+    object = combined,
+    region = 'chr10-93247414-93311135',
+    extend.upstream = 40000,
+    extend.downstream = 20000,
+    features = 'Elk3'
+)
+dev.off()
+
+
+
+png("CoveragePlot_Wnt5b.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+CoveragePlot(
+    object = combined,
+    region = 'chr6-119432531-119544347',
+    extend.upstream = 40000,
+    extend.downstream = 20000,
+    features = 'Wnt5b'
+)
+dev.off()
+
+png("CoveragePlot_Ctbp2.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+CoveragePlot(
+    object = combined,
+    region = 'chr7-132987621-133123367',
+    extend.upstream = 40000,
+    extend.downstream = 20000,
+    features = 'Ctbp2'
+)
+dev.off()
+
+
+
+png("CoveragePlot_Ccbe1.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+CoveragePlot(
+    object = combined,
+    region = 'chr18-66045302-66302741',
+    extend.upstream = 40000,
+    extend.downstream = 20000,
+    features = 'Ccbe1'
+)
+dev.off()
+
+png("CoveragePlot_Ptprd.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+CoveragePlot(
+    object = combined,
+    region = 'chr4-75944958-76325264',
+    extend.upstream = 40000,
+    extend.downstream = 20000,
+    features = 'Ptprd'
+)
+dev.off()
+
+
+
+png("CoveragePlot_Gnai1.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+CoveragePlot(
+    object = combined,
+    region = 'chr5-18265135-18360355',
+    extend.upstream = 40000,
+    extend.downstream = 20000,
+    features = 'Gnai1'
+)
+dev.off()
+
+png("CoveragePlot_Rara.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+CoveragePlot(
+    object = combined,
+    region = 'chr11-98939711-98974942',
+    extend.upstream = 40000,
+    extend.downstream = 20000,
+    features = 'Rara'
+)
+dev.off()
+
+
+
+png("CoveragePlot_Btaf1.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+CoveragePlot(
+    object = combined,
+    region = 'chr19-36926079-37012752',
+    extend.upstream = 40000,
+    extend.downstream = 20000,
+    features = 'Btaf1'
+)
+dev.off()
+
+png("CoveragePlot_Chn2.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+CoveragePlot(
+    object = combined,
+    region = 'chr6-54039573-54300721',
+    extend.upstream = 40000,
+    extend.downstream = 20000,
+    features = 'Chn2'
+)
+dev.off()
+
+
+
+Aciner <- c('Rbpil','Chrm3','Lrig1','Insr','Foxp2','Chn2','Dtna','Sdk1','Map3k5','Camk1d','Reg3a','Reg3g','Reg1b','Cpb1','Cpa1','Prss3','Prss1','Amy2a','Cela2b','Cela3a','Cela3b','Sycn','Clps','Pnlip','Spink1','Ctrc','Cpa2','Cftr','Bicca','Anxa4','Slc4a4','Glis3','Sctr','Aldh1a1')
+
+png("featurePlot_combined_Aciner.png", width = 20, height = 20, units = 'in', res = 600, type = 'cairo')
+FeaturePlot(combined, features = Aciner, cols = c("antiquewhite2", "darkblue"), reduction = 'umap')
+dev.off()
+
+Other <- c('Flt1','Plvap','Vwf','Cd36','Slco2a1','Cd74','Ptprc','Zeb2','Cspg4','Mcam','Pdgfrb','Fabp4','Notch3','Des','Itga1','Itga7','Col4a1','Negr1','Col5a2','Col6a3','Lama2','Dcn','Lamb1','Cdh19','S100b','Cryab','Pmp22','Scn7a')
+
+png("featurePlot_combined_Other.png", width = 20, height = 20, units = 'in', res = 600, type = 'cairo')
+FeaturePlot(combined, features = Other, cols = c("antiquewhite2", "darkblue"), reduction = 'umap')
+dev.off()
+
+
+
+
+#####Cluster 3 vs CLuster 9
+combined.markers <- FindMarkers(combined, ident.1 = "9", ident.2 = "0", only.pos = FALSE, min.pct = 0.0, log2fc.threshold = 0.1)
+write.table(combined.markers,"9VS0.markers.markers_all.csv",sep=",")
+
+combined.markers <- FindMarkers(combined, ident.1 = "9", ident.2 = "0", only.pos = TRUE, min.pct = 0.0, log2fc.threshold = 0.1)
+write.table(combined.markers,"9VS0.markers.markers_positive.csv",sep=",")
+
+top10 <-combined.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+write.table(top10, "0VS9.markers.top10_genes.csv", sep = ',')
+
+top2 <-combined.markers %>% group_by(cluster) %>% top_n(n = 2, wt = avg_log2FC)
+write.table(top2, "0VS9.markers.top2_genes.csv", sep = ',')
+
+
+
+
+
+png("CoveragePlot_Sox9.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+CoveragePlot(
+    object = combined,
+    region = 'chr11-112782224-112787760',
+    extend.upstream = 40000,
+    extend.downstream = 20000,
+    features = 'Sox9'
+)
+dev.off()
+
+
+
+png("CoveragePlot_Hnf1b.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+CoveragePlot(
+    object = combined,
+    region = 'chr11-83850874-83905816',
+    extend.upstream = 40000,
+    extend.downstream = 20000,
+    features = 'Hnf1b'
+)
+dev.off()
+
+png("CoveragePlot_Krt19.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+CoveragePlot(
+    object = combined,
+    region = 'chr11-100140810-100146120',
+    extend.upstream = 40000,
+    extend.downstream = 20000,
+    features = 'Krt19'
+)
+dev.off()
+
+
+png("CoveragePlot_Ptk7.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+CoveragePlot(
+    object = combined,
+    region = 'chr17-46564471-46629504',
+    extend.upstream = 40000,
+    extend.downstream = 20000,
+    features = 'Ptk7'
+)
+dev.off()
+
+
+
+png("CoveragePlot_Cd44.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+CoveragePlot(
+    object = combined,
+    region = 'chr2-102814120-102901369',
+    extend.upstream = 40000,
+    extend.downstream = 20000,
+    features = 'Cd44'
+)
+dev.off()
+
+png("CoveragePlot_Epcam.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+CoveragePlot(
+    object = combined,
+    region = 'chr17-87635979-87651106',
+    extend.upstream = 40000,
+    extend.downstream = 20000,
+    features = 'Epcam'
+)
+dev.off()
+
+
+png("CoveragePlot_Vmp1.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+CoveragePlot(
+    object = combined,
+    region = 'chr11-86583865-86683836',
+    extend.upstream = 40000,
+    extend.downstream = 20000,
+    features = 'Vmp1'
+)
+dev.off()
+
+
+
+png("CoveragePlot_Tspan8.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+CoveragePlot(
+    object = combined,
+    region = 'chr10-115817283-115849893',
+    extend.upstream = 40000,
+    extend.downstream = 20000,
+    features = 'Tspan8'
+)
+dev.off()
+
+png("CoveragePlot_Cftr.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+CoveragePlot(
+    object = combined,
+    region = 'chr6-18170687-18322768',
+    extend.upstream = 40000,
+    extend.downstream = 20000,
+    features = 'Cftr'
+)
+dev.off()
+
+png("VlnPlot Ror2.png", width = 6, height = 6, units = 'in', res = 600, type = 'cairo')
+VlnPlot(combined, features='Ror2',  pt.size = 0)
+dev.off()
+
+png("featurePlot_Ror2.png", width = 6, height = 6, units = 'in', res = 600, type = 'cairo')
+FeaturePlot(combined, features = 'Ror2', cols = c("antiquewhite2", "darkblue"), reduction = 'umap')
+dev.off()
+
+
+
+##### Motifs
+
+differential.activity <- FindMarkers(
+    object = combined_V2,
+    ident.1 = '1',
+    ident.2 = '0',
+    only.pos = FALSE,
+    test.use = 'LR',
+    latent.vars = 'atac_peak_region_fragments'
+)
+
+top.da.peak <- rownames(differential.activity)
+
+
+closest_l23 <- ClosestFeature(combined_V2, top.da.peak)
+
+
+# test enrichment
+enriched.motifs <- FindMotifs(
+    object = combined_V2,
+    features = top.da.peak
+)
+
+
+MotifPlot(
+    object = combined_V2,
+    motifs = head(rownames(enriched.motifs))
+)
+
+gene_list <- c('MA1627.1', 'MA1623.1', 'MA1625.1','MA0633.1')
+dir.create("./Motifs_plots/")
+for (i in 1:length(gene_list)){
+
+    file_png_name<-paste("./Motifs_plots/Motif_",gene_list[i],".png",sep="")
+    fplot<-MotifPlot(object = combined_V2, motifs = gene_list[i])
+    png(file_png_name, width=4, height=4, units = "in", res = 600, type = 'cairo')
+    print(fplot)
+    dev.off()
+}
+

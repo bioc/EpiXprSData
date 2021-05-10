@@ -1,0 +1,24 @@
+{
+    "id": "1A4F89BC",
+    "path": "S:/PHS/Files/Computational_Immunology/20191002_scATAC-seq_LC_NovaA-139/Combined_Script.R",
+    "project_path": null,
+    "type": "r_source",
+    "hash": "0",
+    "contents": "",
+    "dirty": true,
+    "created": 1620655221612.0,
+    "source_on_save": false,
+    "relative_order": 5,
+    "properties": {
+        "cursorPosition": "566,0",
+        "scrollLine": "540"
+    },
+    "folds": "",
+    "lastKnownWriteTime": 1620655930,
+    "encoding": "UTF-8",
+    "collab_server": "",
+    "source_window": "",
+    "last_content_update": 1620656152482,
+    "read_only": false,
+    "read_only_alternatives": []
+}

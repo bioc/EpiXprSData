@@ -1,0 +1,24 @@
+Package: EpiXprSData
+Type: Package
+Title: Tissue Specific Gene Expression Prediction Models Constructed 
+    From Paired DNA Methylation and RNA Counts
+Version: 0.1.0
+Authors@R:
+    c(person(given = "Ian", family = "Loveless", role = c("aut", "cre"),
+             email = "ilovele1@hfhs.org",
+             comment = c(ORCID = "0000-0003-4645-6559")),
+      person(given = "Albert", family = "Levin", role = "aut"))
+Maintainer: The package maintainer <yourself@somewhere.net>
+Description: Models constructed on paired DNA methylation and gene expression
+    counts for the purpose of predicting expression in samples with only DNA
+    methylation. This data package is designed to be used in conjunction with 
+    the EpiXprS Bioconductor package. 
+License: What license is it under?
+Encoding: UTF-8
+LazyData: true
+biocViews:
+    ExperimentHub,
+    Homo_sapiens_Data,
+Depends:
+    R (>= 4.1)
+RoxygenNote: 7.1.1

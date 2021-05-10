@@ -1,0 +1,578 @@
+library(Signac)
+library(Seurat)
+library(GenomicRanges)
+library(future)
+library(GenomeInfoDb)
+library(EnsDb.Mmusculus.v79)
+library(ggplot2)
+library(patchwork)
+set.seed(1234)
+plan("multiprocess", workers = 4)
+options(future.globals.maxSize = 50000 * 1024^2) # for 50 Gb RAM
+
+setwd('/share/studies/Dermatology_Data/Data_Analysis/20191002_scATAC-seq_LC_NovaA-139')
+
+
+# read in peak sets
+peaks.Lg1 <- read.table(
+    file = "/share/data/Dermatology_Data/20191002_scATAC-seq_LC_NovaA-139/Sample_20190813-Lg1/outs/peaks.bed",
+    col.names = c("chr", "start", "end")
+)
+peaks.Lg2 <- read.table(
+    file = "/share/data/Dermatology_Data/20191002_scATAC-seq_LC_NovaA-139/Sample_20190813-Lg2/outs/peaks.bed",
+    col.names = c("chr", "start", "end")
+)
+peaks.P0 <- read.table(
+    file = "/share/data/Dermatology_Data/20191002_scATAC-seq_LC_NovaA-139/Sample_P0-LG-AM/outs/peaks.bed",
+    col.names = c("chr", "start", "end")
+)
+peaks.E185 <- read.table(
+    file = "/share/data/Dermatology_Data/20191002_scATAC-seq_LC_NovaA-139/Sample_E185-LG-AM/outs/peaks.bed",
+    col.names = c("chr", "start", "end")
+)
+
+# convert to genomic ranges
+gr.Lg1 <- makeGRangesFromDataFrame(peaks.Lg1)
+gr.Lg2 <- makeGRangesFromDataFrame(peaks.Lg2)
+gr.P0 <- makeGRangesFromDataFrame(peaks.P0)
+gr.E185 <- makeGRangesFromDataFrame(peaks.E185)
+
+# Create a unified set of peaks to quantify in each dataset
+combined.peaks <- reduce(x = c(gr.Lg1, gr.Lg2, gr.P0, gr.E185))
+
+# Filter out bad peaks based on length
+peakwidths <- width(combined.peaks)
+combined.peaks <- combined.peaks[peakwidths  < 10000 & peakwidths > 20]
+combined.peaks
+
+
+# load metadata
+md.Lg1 <- read.table(
+    file = "/share/data/Dermatology_Data/20191002_scATAC-seq_LC_NovaA-139/Sample_20190813-Lg1/outs/singlecell.csv",
+    stringsAsFactors = FALSE,
+    sep = ",",
+    header = TRUE,
+    row.names = 1
+)[-1, ] # remove the first row
+
+md.Lg2 <- read.table(
+    file = "/share/data/Dermatology_Data/20191002_scATAC-seq_LC_NovaA-139/Sample_20190813-Lg2/outs/singlecell.csv",
+    stringsAsFactors = FALSE,
+    sep = ",",
+    header = TRUE,
+    row.names = 1
+)[-1, ]
+
+md.P0 <- read.table(
+    file = "/share/data/Dermatology_Data/20191002_scATAC-seq_LC_NovaA-139/Sample_P0-LG-AM/outs/singlecell.csv",
+    stringsAsFactors = FALSE,
+    sep = ",",
+    header = TRUE,
+    row.names = 1
+)[-1, ]
+
+md.E185 <- read.table(
+    file = "/share/data/Dermatology_Data/20191002_scATAC-seq_LC_NovaA-139/Sample_E185-LG-AM/outs/singlecell.csv",
+    stringsAsFactors = FALSE,
+    sep = ",",
+    header = TRUE,
+    row.names = 1
+)[-1, ]
+
+# perform an initial filtering of low count cells
+md.Lg1 <- md.Lg1[md.Lg1$passed_filters > 500, ]
+md.Lg2 <- md.Lg2[md.Lg2$passed_filters > 500, ]
+md.P0 <- md.P0[md.P0$passed_filters > 500, ]
+md.E185 <- md.E185[md.E185$passed_filters > 1000, ] # sequenced deeper so set higher cutoff
+
+# create fragment objects
+frags.Lg1 <- CreateFragmentObject(
+    path = "/share/data/Dermatology_Data/20191002_scATAC-seq_LC_NovaA-139/Sample_20190813-Lg1/outs/fragments.tsv.gz",
+    cells = rownames(md.Lg1)
+)
+
+frags.Lg2 <- CreateFragmentObject(
+    path = "/share/data/Dermatology_Data/20191002_scATAC-seq_LC_NovaA-139/Sample_20190813-Lg2/outs/fragments.tsv.gz",
+    cells = rownames(md.Lg2)
+)
+
+frags.P0 <- CreateFragmentObject(
+    path = "/share/data/Dermatology_Data/20191002_scATAC-seq_LC_NovaA-139/Sample_P0-LG-AM/outs/fragments.tsv.gz",
+    cells = rownames(md.P0)
+)
+
+frags.E185 <- CreateFragmentObject(
+    path = "/share/data/Dermatology_Data/20191002_scATAC-seq_LC_NovaA-139/Sample_E185-LG-AM/outs/fragments.tsv.gz",
+    cells = rownames(md.E185)
+)
+
+Lg1.counts <- FeatureMatrix(
+    fragments = frags.Lg1,
+    features = combined.peaks,
+    cells = rownames(md.Lg1)
+)
+
+Lg2.counts <- FeatureMatrix(
+    fragments = frags.Lg2,
+    features = combined.peaks,
+    cells = rownames(md.Lg2)
+)
+
+P0.counts <- FeatureMatrix(
+    fragments = frags.P0,
+    features = combined.peaks,
+    cells = rownames(md.P0)
+)
+
+E185.counts <- FeatureMatrix(
+    fragments = frags.E185,
+    features = combined.peaks,
+    cells = rownames(md.E185)
+)
+
+Lg1_assay <- CreateChromatinAssay(Lg1.counts, fragments = frags.Lg1)
+Lg1 <- CreateSeuratObject(Lg1_assay, assay = "ATAC", meta.data = md.Lg1)
+
+Lg2_assay <- CreateChromatinAssay(Lg2.counts, fragments = frags.Lg2)
+Lg2 <- CreateSeuratObject(Lg2_assay, assay = "ATAC", meta.data = md.Lg2)
+
+P0_assay <- CreateChromatinAssay(P0.counts, fragments = frags.P0)
+P0 <- CreateSeuratObject(P0_assay, assay = "ATAC", meta.data = md.P0)
+
+E185_assay <- CreateChromatinAssay(E185.counts, fragments = frags.E185)
+E185 <- CreateSeuratObject(E185_assay, assay = "ATAC", meta.data = md.E185)
+
+Lg1$Sample_Name<-"Adult_1"
+Lg2$Sample_Name<-"Adult_2"
+P0$Sample_Name<-"P0"
+E185$Sample_Name<-"E18.5"
+
+Lg1$Sample_Group<-"Adult"
+Lg2$Sample_Group<-"Adult"
+P0$Sample_Group<-"P0"
+E185$Sample_Group<-"E18.5"
+
+
+# merge all datasets, adding a cell ID to make sure cell names are unique
+combined <- merge(
+    x = Lg1,
+    y = list(Lg2, P0, E185),
+    add.cell.ids = c("Lg1", "Lg2", "P0", "E185")
+)
+combined[["ATAC"]]
+
+combined <- RunTFIDF(combined)
+combined <- FindTopFeatures(combined, min.cutoff = 20)
+combined <- RunSVD(combined)
+combined <- RunUMAP(combined, dims = 2:50, reduction = 'lsi')
+
+DimPlot(combined, group.by = 'Sample_Group', pt.size = 0.1)
+
+saveRDS(combined, file = 'ATAC_Combined_Lung.RDS')
+
+
+# extract gene annotations from EnsDb
+annotations <- GetGRangesFromEnsDb(ensdb = EnsDb.Mmusculus.v79)
+
+# change to UCSC style since the data was mapped to hg19
+seqlevelsStyle(annotations) <- 'UCSC'
+genome(annotations) <- "mm10"
+
+# add the gene information to the object
+Annotation(combined) <- annotations
+
+combined <- NucleosomeSignal(object = combined)
+
+combined$nucleosome_group <- ifelse(combined$nucleosome_signal > 4, 'NS > 4', 'NS < 4')
+FragmentHistogram(object = combined, group.by = 'nucleosome_group', region = 'chr1-1-10000000')
+
+combined <- TSSEnrichment(combined, fast = FALSE)
+
+combined$high.tss <- ifelse(combined$TSS.enrichment > 2, 'High', 'Low')
+TSSPlot(combined, group.by = 'high.tss') + NoLegend()
+
+combined$pct_reads_in_peaks <- combined$peak_region_fragments / combined$passed_filters * 100
+combined$blacklist_ratio <- combined$blacklist_region_fragments / combined$peak_region_fragments
+
+VlnPlot(
+    object = combined,
+    features = c('pct_reads_in_peaks', 'peak_region_fragments',
+                 'TSS.enrichment', 'blacklist_ratio', 'nucleosome_signal'),
+    pt.size = 0.1,
+    ncol = 5
+)
+
+combined <- subset(
+    x = combined,
+    subset = peak_region_fragments > 3000 &
+        peak_region_fragments < 100000 &
+        pct_reads_in_peaks > 40 &
+        blacklist_ratio < 0.035 &
+        nucleosome_signal < 4 &
+        TSS.enrichment > 2
+)
+combined
+
+combined <- RunTFIDF(combined)
+combined <- FindTopFeatures(combined, min.cutoff = 'q0')
+combined <- RunSVD(object = combined)
+
+DepthCor(combined)
+
+combined <- RunUMAP(
+    object = combined,
+    reduction = 'lsi',
+    dims = 2:30
+)
+combined <- FindNeighbors(
+    object = combined,
+    reduction = 'lsi',
+    dims = 2:30
+)
+combined <- FindClusters(
+    object = combined,
+    algorithm = 3,
+    resolution = .5,
+    verbose = FALSE
+)
+
+png('DimPlot_UMAP_Samplename.png', width = 7, height = 7, units = 'in', res = 600)
+DimPlot(object = combined, label = TRUE, group.by = 'Sample_Name') + NoLegend()
+dev.off()
+
+png('DimPlot_UMAP_SampleGroup.png', width = 7, height = 7, units = 'in', res = 600)
+DimPlot(object = combined, label = TRUE, group.by = 'Sample_Group') + NoLegend()
+dev.off()
+
+png('DimPlot_UMAP.png', width = 7, height = 7, units = 'in', res = 600)
+DimPlot(object = combined, label = TRUE) + NoLegend()
+dev.off()
+
+# compute gene activities
+gene.activities <- GeneActivity(combined)
+
+# add the gene activity matrix to the Seurat object as a new assay
+combined[['RNA']] <- CreateAssayObject(counts = gene.activities)
+combined <- NormalizeData(
+    object = combined,
+    assay = 'RNA',
+    normalization.method = 'LogNormalize',
+    scale.factor = median(combined$nCount_RNA)
+)
+
+DefaultAssay(combined) <- 'RNA'
+
+
+all.genes <- rownames(combined)
+combined <- ScaleData(combined, features = all.genes)
+
+combined.markers <- FindAllMarkers(combined, only.pos = FALSE, min.pct = 0.0, log2fc.threshold = 0.1)
+write.table(combined.markers,"combined.markers.markers_all.csv",sep=",")
+
+combined.markers <- FindAllMarkers(combined, only.pos = TRUE, min.pct = 0.0, log2fc.threshold = 0.1)
+write.table(combined.markers,"combined.markers.markers_positive.csv",sep=",")
+
+top10 <-combined.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+write.table(top10, "combined.markers.top10_genes.csv", sep = ',')
+
+top2 <-combined.markers %>% group_by(cluster) %>% top_n(n = 2, wt = avg_log2FC)
+write.table(top2, "combined.markers.top2_genes.csv", sep = ',')
+
+png("DoHeatmap.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+DoHeatmap(object = combined, features = top10$gene)+ theme(axis.text.y = element_text(size = 6))
+dev.off()
+
+
+png("featurePlot_combined_top2genes.png", width = 20, height = 20, units = 'in', res = 600, type = 'cairo')
+FeaturePlot(combined, features = top2$gene, cols = c("antiquewhite2", "darkblue"), reduction = 'umap')
+dev.off()
+
+
+#### Adult Subset
+dir.create('Adult')
+setwd('Adult')
+adult <- subset(combined, subset = Sample_Group == 'Adult')
+
+DefaultAssay(adult) <- 'ATAC'
+
+adult <- FindNeighbors(
+    object = adult,
+    reduction = 'lsi',
+    dims = 2:30
+)
+adult <- FindClusters(
+    object = adult,
+    algorithm = 3,
+    resolution = .2,
+    verbose = FALSE
+)
+
+
+
+png('DimPlot_UMAP.png', width = 7, height = 7, units = 'in', res = 600)
+DimPlot(object = adult, label = TRUE) + NoLegend()
+dev.off()
+
+# compute gene activities
+gene.activities <- GeneActivity(adult)
+
+# add the gene activity matrix to the Seurat object as a new assay
+adult[['RNA']] <- CreateAssayObject(counts = gene.activities)
+adult <- NormalizeData(
+    object = adult,
+    assay = 'RNA',
+    normalization.method = 'LogNormalize',
+    scale.factor = median(adult$nCount_RNA)
+)
+
+DefaultAssay(adult) <- 'RNA'
+
+
+all.genes <- rownames(adult)
+adult <- ScaleData(adult, features = all.genes)
+
+adult.markers <- FindAllMarkers(adult, only.pos = FALSE, min.pct = 0.0, log2fc.threshold = 0.1)
+write.table(adult.markers,"adult.markers.markers_all.csv",sep=",")
+
+adult.markers <- FindAllMarkers(adult, only.pos = TRUE, min.pct = 0.0, log2fc.threshold = 0.1)
+write.table(adult.markers,"adult.markers.markers_positive.csv",sep=",")
+
+top10 <-adult.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+write.table(top10, "adult.markers.top10_genes.csv", sep = ',')
+
+top2 <-adult.markers %>% group_by(cluster) %>% top_n(n = 2, wt = avg_log2FC)
+write.table(top2, "adult.markers.top2_genes.csv", sep = ',')
+
+png("DoHeatmap.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+DoHeatmap(object = adult, features = top10$gene)+ theme(axis.text.y = element_text(size = 6))
+dev.off()
+
+
+png("featurePlot_adult_top2genes.png", width = 20, height = 20, units = 'in', res = 600, type = 'cairo')
+FeaturePlot(adult, features = top2$gene, cols = c("antiquewhite2", "darkblue"), reduction = 'umap')
+dev.off()
+
+
+png("VlnPlot_Adult_top2_genes.png", width = 20, height = 20, units = 'in', res = 600, type = 'cairo')
+plot_grid(
+    VlnPlot(adult, features=top2$gene[1],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(adult, features=top2$gene[2],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(adult, features=top2$gene[3],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(adult, features=top2$gene[4],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(adult, features=top2$gene[5],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(adult, features=top2$gene[6],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(adult, features=top2$gene[7],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(adult, features=top2$gene[8],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(adult, features=top2$gene[9],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(adult, features=top2$gene[10],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE)
+
+
+
+)
+dev.off()
+
+
+
+
+saveRDS(adult, file = 'Adult_ATAC.rds')
+
+setwd('..')
+
+#### E185 Subset
+dir.create('E185')
+setwd('E185')
+E185 <- subset(combined, subset = Sample_Group == 'E18.5')
+
+DefaultAssay(E185) <- 'ATAC'
+
+E185 <- FindNeighbors(
+    object = E185,
+    reduction = 'lsi',
+    dims = 2:30
+)
+E185 <- FindClusters(
+    object = E185,
+    algorithm = 3,
+    resolution = .2,
+    verbose = FALSE
+)
+
+
+
+png('DimPlot_UMAP.png', width = 7, height = 7, units = 'in', res = 600)
+DimPlot(object = E185, label = TRUE) + NoLegend()
+dev.off()
+
+# compute gene activities
+gene.activities <- GeneActivity(E185)
+
+# add the gene activity matrix to the Seurat object as a new assay
+E185[['RNA']] <- CreateAssayObject(counts = gene.activities)
+E185 <- NormalizeData(
+    object = E185,
+    assay = 'RNA',
+    normalization.method = 'LogNormalize',
+    scale.factor = median(E185$nCount_RNA)
+)
+
+DefaultAssay(E185) <- 'RNA'
+
+
+all.genes <- rownames(E185)
+E185 <- ScaleData(E185, features = all.genes)
+
+E185.markers <- FindAllMarkers(E185, only.pos = FALSE, min.pct = 0.0, log2fc.threshold = 0.1)
+write.table(E185.markers,"E185.markers.markers_all.csv",sep=",")
+
+E185.markers <- FindAllMarkers(E185, only.pos = TRUE, min.pct = 0.0, log2fc.threshold = 0.1)
+write.table(E185.markers,"E185.markers.markers_positive.csv",sep=",")
+
+top10 <-E185.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+write.table(top10, "E185.markers.top10_genes.csv", sep = ',')
+
+top2 <-E185.markers %>% group_by(cluster) %>% top_n(n = 2, wt = avg_log2FC)
+write.table(top2, "E185.markers.top2_genes.csv", sep = ',')
+
+png("DoHeatmap.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+DoHeatmap(object = E185, features = top10$gene)+ theme(axis.text.y = element_text(size = 6))
+dev.off()
+
+
+png("featurePlot_E185_top2genes.png", width = 20, height = 20, units = 'in', res = 600, type = 'cairo')
+FeaturePlot(E185, features = top2$gene, cols = c("antiquewhite2", "darkblue"), reduction = 'umap')
+dev.off()
+
+png("VlnPlot_E185_top2_genes.png", width = 20, height = 20, units = 'in', res = 600, type = 'cairo')
+plot_grid(
+    VlnPlot(E185, features=top2$gene[1],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(E185, features=top2$gene[2],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(E185, features=top2$gene[3],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(E185, features=top2$gene[4],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(E185, features=top2$gene[5],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(E185, features=top2$gene[6],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(E185, features=top2$gene[7],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(E185, features=top2$gene[8],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE)
+
+
+
+)
+dev.off()
+
+
+
+saveRDS(E185, file = 'E185_ATAC.rds')
+
+setwd('..')
+
+
+
+#### P0 Subset
+dir.create('P0')
+setwd('P0')
+P0 <- subset(combined, subset = Sample_Group == 'P0')
+
+DefaultAssay(P0) <- 'ATAC'
+
+P0 <- FindNeighbors(
+    object = P0,
+    reduction = 'lsi',
+    dims = 2:30
+)
+P0 <- FindClusters(
+    object = P0,
+    algorithm = 3,
+    resolution = .2,
+    verbose = FALSE
+)
+
+
+
+png('DimPlot_UMAP.png', width = 7, height = 7, units = 'in', res = 600)
+DimPlot(object = P0, label = TRUE) + NoLegend()
+dev.off()
+
+# compute gene activities
+gene.activities <- GeneActivity(P0)
+
+# add the gene activity matrix to the Seurat object as a new assay
+P0[['RNA']] <- CreateAssayObject(counts = gene.activities)
+P0 <- NormalizeData(
+    object = P0,
+    assay = 'RNA',
+    normalization.method = 'LogNormalize',
+    scale.factor = median(P0$nCount_RNA)
+)
+
+DefaultAssay(P0) <- 'RNA'
+
+
+all.genes <- rownames(P0)
+P0 <- ScaleData(P0, features = all.genes)
+
+P0.markers <- FindAllMarkers(P0, only.pos = FALSE, min.pct = 0.0, log2fc.threshold = 0.1)
+write.table(P0.markers,"P0.markers.markers_all.csv",sep=",")
+
+P0.markers <- FindAllMarkers(P0, only.pos = TRUE, min.pct = 0.0, log2fc.threshold = 0.1)
+write.table(P0.markers,"P0.markers.markers_positive.csv",sep=",")
+
+top10 <-P0.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+write.table(top10, "P0.markers.top10_genes.csv", sep = ',')
+
+top2 <-P0.markers %>% group_by(cluster) %>% top_n(n = 2, wt = avg_log2FC)
+write.table(top2, "P0.markers.top2_genes.csv", sep = ',')
+
+png("DoHeatmap.png", width = 8, height = 10, units = 'in', res = 600, type = 'cairo')
+DoHeatmap(object = P0, features = top10$gene)+ theme(axis.text.y = element_text(size = 6))
+dev.off()
+
+
+png("featurePlot_P0_top2genes.png", width = 20, height = 20, units = 'in', res = 600, type = 'cairo')
+FeaturePlot(P0, features = top2$gene, cols = c("antiquewhite2", "darkblue"), reduction = 'umap')
+dev.off()
+
+png("VlnPlot_P0_top2_genes.png", width = 20, height = 20, units = 'in', res = 600, type = 'cairo')
+plot_grid(
+    VlnPlot(P0, features=top2$gene[1],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(P0, features=top2$gene[2],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(P0, features=top2$gene[3],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(P0, features=top2$gene[4],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(P0, features=top2$gene[5],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(P0, features=top2$gene[6],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(P0, features=top2$gene[7],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(P0, features=top2$gene[8],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(P0, features=top2$gene[9],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(P0, features=top2$gene[10],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(P0, features=top2$gene[11],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE),
+    VlnPlot(P0, features=top2$gene[12],  pt.size = 0)+theme(axis.text.x = element_text(size = 10,angle = 90, hjust = 1), axis.title.x = element_blank()) + guides(fill=FALSE)
+
+
+
+)
+dev.off()
+
+
+
+saveRDS(P0, file = 'P0_ATAC.rds')
+
+setwd('..')
+
+
+combined_V2 <- ScaleData(combined_V2)
+combined_V2 <- RunPCA(combined_V2)
+combined_V2 <- RunUMAP(
+    object = combined,
+    reduction = 'lsi',
+    dims = 2:30
+)
+
+combined_V2 <- FindNeighbors(
+    object = combined_V2,
+    reduction = 'lsi',
+    dims = 2:30
+)
+combined_V2 <- FindClusters(
+    object = combined_V2,
+    algorithm = 3,
+    resolution = .5,
+    verbose = FALSE
+)

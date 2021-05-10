@@ -1,0 +1,274 @@
+
+#alldata input
+library(rJava)
+library(FSelector)
+library(randomForest)
+library(readr)
+library(pROC)
+library(rfUtilities)
+library(e1071)
+library(caret)
+library(plyr)
+library(readr)
+CP3 <- read_csv("/share/data/Al_Ben/SOAR/Image_CP3/DOD_Expasion_PilotData/CellCytoplasmaNuclei_withname.csv")
+
+#CP3 <- read_csv("S:/PHS/Files/Intern_Pathomics/SOAR_PRADTissue/Tissue_HE/CellProfiler/RandomForest_20190905/ALLCytoplasmaNuclei_withname.csv")
+
+CP3<-as.data.frame(CP3)
+#215 14384
+
+name.tem<-names(CP3)
+name.tem<-gsub("%","pct",name.tem,fixed=T)
+names(CP3)<-name.tem
+
+CP3$label<-ifelse(CP3$label=="NonBCR5Year",0,1)
+CP=CP3[,c(-1,-2,-3)]
+# dim(CP)
+#[1]   215 14381
+
+#randomforest(total)
+CP.rf<-randomForest(label~.,data=CP,ntree=1000,importance=TRUE)
+print(CP.rf)
+library(caret)
+p<-predict(NCC.rf, predict=TRUE,type="prob")
+p<-as.data.frame(p)
+
+#ROC
+library(pROC)
+pdf(paste("/home/chaonanw/SOAR_PRADTissue/5image/150imageRFroc.pdf"))
+prob.imagerf.roc.rec<-roc(NCC$label,p[,2],plot=TRUE,legacy.axes=TRUE,print.auc=T)
+print(prob.imagerf.roc.rec$auc)
+dev.off()
+
+
+#N200importantce selection
+CPnc<-count(CP3,c("label","Sample"))
+
+#var <- apply(CP3[5:21574], 2, function(x) var(x))
+#CP3t <- CP3[,5:21574]
+#CP3t <- CP3t[,var > 0]
+#CP4 <- cbind(CP3[,1:4],CP3t)
+#write.csv(Fweight,file="/home/ianl/Image_Analysis/gain.ratio.Importance.csv",
+          #row.names = F,col.names = T)
+treetable<-matrix(list(), 10, 1)
+svmtable<-matrix(list(), 10, 1)
+cubictable<-matrix(list(), 10, 1)
+DLDAtable<-matrix(list(), 10, 1)
+
+for(j in 1:nrow(CPnc)){#leave one out
+  print(j)
+  nctest<-CPnc[j,]
+  nctrain<-CPnc[-j,]
+  CP3Test=CP3[CP3$Sample %in% nctest$Sample,]
+  CP3Train=CP3[CP3$Sample %in% nctrain$Sample,]
+  var <- apply(CP3Train[5:ncol(CP3Train)], 2, function(x) var(x))
+  CP3t <- CP3Train[,5:ncol(CP3Train)]
+  CP3Train1 <- CP3t[,var > 0]
+  CP3te <- CP3Test[,5:ncol(CP3Train)]
+  CP3Test1 <- CP3te[,var>0]
+  CPTest=cbind(CP3Test[,4],CP3Test1)
+  CPTrain=cbind(CP3Train[,4],CP3Train1)
+  colnames(CPTest) <- c('label',colnames(CP3Test1))
+  colnames(CPTrain) <- c('label',colnames(CP3Test1))
+  
+#tmp  <-BD(CPTrain[,2:ncol(CPTrain)],CPTrain[,1])
+tmp <- apply(CPTrain[,2:ncol(CPTrain)],2,function(x) t.test(x[CPTrain[,1]==1],x[CPTrain[,1]==0])$p.value)
+Fweight <- sort(tmp,index.return=T)$ix
+#Fweight <- tmp$ix
+ Fweight <- Fweight + 1
+#  train1 <- CPTrain[,c(1:(ncol(CPTrain)/2)-1)]
+#  train2 <- CPTrain[,c(1,(ncol(CPTrain)/2):ncol(CPTrain))]
+#  Fweight1 <- gain.ratio(label~.,data=train1)
+# N<-cutoff.k(Fweight1,7500)
+#  Fweight2 <- gain.ratio(label~.,data=train2)
+#  N2<-cutoff.k(Fweight2,7500)
+#  Fweight3 <- c(N,N2)
+#  Fweight <- gain.ratio(label~.,data=CPTrain[,c(1,which(colnames(CPTrain) %in% Fweight3))])
+for (i in seq(10, 100, by=10)){
+#N1<-cutoff.k(Fweight,i)
+  N1 <- Fweight[1:i]
+
+
+  
+  CPTrain$label<-as.factor(CPTrain$label)
+  CPTrain.rf<-randomForest(CPTrain$label~.,data=CPTrain[,N1],ntree=1000,importance=TRUE)
+  predicted<-predict(CPTrain.rf,CPTest[,N1])
+  
+  if(j==1) treetable[[i]]<-cbind(j,CP3Test[,c(1:4)],predicted)
+  else treetable[[i]]<-rbind(treetable[[i]],cbind(j,CP3Test[,c(1:4)],predicted))
+  
+  model <- svm(CPTrain$label~., data=CPTrain[,N1], kernel = 'linear')
+  svm.predicted <- predict(model, CPTest[,N1])
+  if(j==1) svmtable[[i]]<-cbind(j,CP3Test[,c(1:4)],svm.predicted)
+  else svmtable[[i]]<-rbind(svmtable[[i]],cbind(j,CP3Test[,c(1:4)],svm.predicted))
+  
+  sv.model <- svm(CPTrain$label~., data=CPTrain[,N1], kernel = 'polynomial')
+  cubic.predicted <- predict(sv.model, CPTest[,N1])
+  if(j==1) cubictable[[i]]<-cbind(j,CP3Test[,c(1:4)],cubic.predicted)
+  else cubictable[[i]]<-rbind(cubictable[[i]],cbind(j,CP3Test[,c(1:4)],cubic.predicted))
+  
+  #ldarule <- dlda(CPTrain$label~., data=CPTrain[,N1])
+  #DLDA.predicted <- predict(ldarule,CPTest[,N1])$class
+  #if(j==1) DLDAtable[[i]]<-cbind(j,CP3Test[,c(1:4)],DLDA.predicted)
+  #else DLDAtable[[i]]<-rbind(DLDAtable[[i]],cbind(j,CP3Test[,c(1:4)],DLDA.predicted))
+  
+  
+  
+}
+
+}
+write.csv(predtable,file="/home/chaonanw/SOAR_PRADTissue/5image/N200predtable.csv",
+          row.names = F,col.names = T)
+
+
+
+
+
+
+
+#ROC
+tables <- c('treetable','svmtable','cubictable')
+
+  for (j in seq(10,100,by=10)){
+
+
+N200pred<- treetable[[j]]
+N200pred<-as.data.frame(N200pred)
+predcount<-table(Sample=N200pred$Sample,prediction=N200pred$predicted)
+predcount<-as.data.frame(predcount)
+tp<-merge(CPnc,predcount,by.x="Sample",by.y="Sample",all.x=FALSE,all.y=TRUE,sort=FALSE)
+colnames(tp)<-c("Sample","label","subcounts","prediction","predcounts")
+tp$recprob<-ifelse(tp$predcounts!=0,tp$predcounts/tp$subcounts,0)
+prob.rec<-tp[tp$prediction==1,]
+
+
+pdf(paste0("/home/ianl/Image_Analysis/CP3/t-test/treetable",j,".pdf"))
+prob.rec.roc<-roc(response = as.factor(prob.rec$label),predictor = prob.rec$recprob,plot=TRUE,legacy.axes=TRUE,print.auc=T)
+print(prob.rec.roc$auc)
+dev.off()
+
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+```
+#classw,cutoff edit
+```{r,echo=FALSE, warning=FALSE, message=FALSE}
+N1<-cutoff.k(Fweight,1000)
+write.csv(N1,file="/home/chaonanw/SOAR_PRADTissue/5image/N1000Importance.csv",
+          row.names = F,col.names = T)
+for(i in 1:5){
+  print(i)
+  for(j in 1:nrow(CPnc)){
+  print(j)
+  nctest<-CPnc[j,]
+  nctrain<-CPnc[-j,]
+  CP3Test=CP3[CP3$Sample %in% nctest$Sample,]
+  CP3Train=CP3[CP3$Sample %in% nctrain$Sample,]
+  
+  CPTest=CP3Test[,c(-1,-2,-3)]
+  CPTrain=CP3Train[,c(-1,-2,-3)]
+  
+  CPTrain$label<-as.factor(CPTrain$label)
+  CPTrain.rf<-randomForest(CPTrain$label~.,data=CPTrain[,N1],ntree=1000,importance=TRUE,classwt=c(6.5,1.9),cutoff=c(0.35,0.65))
+  predicted<-predict(CPTrain.rf,CPTest[,N1])
+  
+  if(j==1) predtable<-cbind(j,CP3Test[,c(1:4)],predicted)
+  else predtable<-rbind(predtable,cbind(j,CP3Test[,c(1:4)],predicted))
+  
+  write.csv(predtable,paste("/home/chaonanw/SOAR_PRADTissue/5image/N1000predtableV2",i,".csv"))
+  }
+  
+  N200pred<-as.data.frame(predtable)
+  predcount<-table(Sample=N200pred$Sample,prediction=N200pred$predicted)
+  predcount<-as.data.frame(predcount)
+  tp<-merge(CPnc,predcount,by.x="Sample",by.y="Sample",all.x=FALSE,all.y=TRUE,sort=FALSE)
+  colnames(tp)<-c("Sample","label","subcounts","prediction","predcounts")
+  tp$recprob<-ifelse(tp$predcounts!=0,tp$predcounts/tp$subcounts,0)
+  prob.rec<-tp[tp$prediction==1,]
+  write.csv(tp,paste("/home/chaonanw/SOAR_PRADTissue/5image/N1000predinPatientsV2",i,".csv"))
+  
+  pdf(paste("/home/chaonanw/SOAR_PRADTissue/5image/N1000leaveoneROCV2",i,".pdf"))
+  prob.rec.roc<-roc(response = as.factor(prob.rec$label),predictor =
+                      prob.rec$recprob,plot=TRUE,legacy.axes=TRUE,print.auc=T)
+  print(prob.rec.roc$auc)
+  dev.off()
+  
+}
+
+
+
+#alldata raindomforest
+N1<-cutoff.k(Fweight,100)
+write.csv(N1,file="S:/PHS/Files/Intern_Pathomics/SOAR_PRADTissue/Tissue_HE/CellProfiler/RandomForest_20190905/Alldata/N100/N100Importance.csv",
+          row.names = F,col.names = T)
+for(i in 1:5){
+  print(i)
+  for(j in 1:nrow(CPnc)){
+  print(j)
+  nctest<-CPnc[j,]
+  nctrain<-CPnc[-j,]
+  CP3Test=CP3[CP3$Sample %in% nctest$Sample,]
+  CP3Train=CP3[CP3$Sample %in% nctrain$Sample,]
+  
+  CPTest=CP3Test[,c(-1,-2,-3)]
+  CPTrain=CP3Train[,c(-1,-2,-3)]
+  
+  CPTrain$label<-as.factor(CPTrain$label)
+  CPTrain.rf<-randomForest(CPTrain$label~.,data=CPTrain[,N1],ntree=1000,importance=TRUE)
+  predicted<-predict(CPTrain.rf,CPTest[,N1])
+  
+  if(j==1) predtable<-cbind(j,CP3Test[,c(1:4)],predicted)
+  else predtable<-rbind(predtable,cbind(j,CP3Test[,c(1:4)],predicted))
+  
+  write.csv(predtable,paste("S:/PHS/Files/Intern_Pathomics/SOAR_PRADTissue/Tissue_HE/CellProfiler/RandomForest_20190905/Alldata/N100/N100predtable",i,".csv"))
+  }
+  
+  N200pred<-as.data.frame(predtable)
+  predcount<-table(Sample=N200pred$Sample,prediction=N200pred$predicted)
+  predcount<-as.data.frame(predcount)
+  tp<-merge(CPnc,predcount,by.x="Sample",by.y="Sample",all.x=FALSE,all.y=TRUE,sort=FALSE)
+  colnames(tp)<-c("Sample","label","subcounts","prediction","predcounts")
+  tp$recprob<-ifelse(tp$predcounts!=0,tp$predcounts/tp$subcounts,0)
+  prob.rec<-tp[tp$prediction==1,]
+  write.csv(tp,paste("S:/PHS/Files/Intern_Pathomics/SOAR_PRADTissue/Tissue_HE/CellProfiler/RandomForest_20190905/Alldata/N100/N100predinPatients",i,".csv"))
+  
+  pdf(paste("S:/PHS/Files/Intern_Pathomics/SOAR_PRADTissue/Tissue_HE/CellProfiler/RandomForest_20190905/Alldata/N100/N100leaveoneROC",i,".pdf"))
+  prob.rec.roc<-roc(response = as.factor(prob.rec$label),predictor =
+                      prob.rec$recprob,plot=TRUE,legacy.axes=TRUE,print.auc=T)
+  print(prob.rec.roc$auc)
+  dev.off()
+  
+}
+
+
+myDQDA <- function(xtrain,xtest){
+  c0 <- cov(xtrain[xtest[,1]==0,-c(1)])
+  c1 <- cov(xtrain[xtest[,1]==1,-c(1)])
+  m0 <- colMeans(xtrain[xtest[,1]==0,-c(1)])
+  m1 <- colMeans(xtrain[xtest[,1]==1,-c(1)])
+  s0 <- mean(diag(c0))
+  s1 <- mean(diag(c1))
+  c0 <- diag(diag(c0))
+  c1 <- diag(diag(c1))
+  c0i <- solve(c0)
+  c1i <- solve(c1)
+  l0 <- chol(c0)
+  l1 <- chol(c1)
+  ld0 <- 2*sum(log(diag(l0)))
+  ld1 <- 2*sum(log(diag(l1)))
+  lr <- ld0 - ld1 +t((xtest[-c(1)]-m0)*c0i*(xtest[-c(1)]-m0)) - t((xtest[-c(1)] - m1)*cl1*(xtest[-c(1)]-m1))
+  return(lr)
+  
+}
+
