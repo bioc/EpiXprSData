@@ -7,18 +7,22 @@ Authors@R:
     c(person(given = "Ian", family = "Loveless", role = c("aut", "cre"),
              email = "ilovele1@hfhs.org",
              comment = c(ORCID = "0000-0003-4645-6559")),
-      person(given = "Albert", family = "Levin", role = "aut"))
-Maintainer: The package maintainer <yourself@somewhere.net>
+      person(given = "Albert", family = "Levin", role = "aut"),
+      person(given = "Gabriel", family = "Bernat", role = "aut"))
 Description: Models constructed on paired DNA methylation and gene expression
     counts for the purpose of predicting expression in samples with only DNA
     methylation. This data package is designed to be used in conjunction with 
     the EpiXprS Bioconductor package. 
-License: What license is it under?
+License: MIT + file LICENSE
 Encoding: UTF-8
 biocViews:
-    ExperimentHubSoftware,
+    ExperimentHub,
     Homo_sapiens_Data,
-    RNASeqData
+    RNASeqData,
+    Tissue,
+    ExpressionData
+Suggests: ExperimentHub (>= 2.0.0), knitr, rmarkdown
 Depends:
     R (>= 4.1)
 RoxygenNote: 7.1.1
+VignetteBuilder: knitr
