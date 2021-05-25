@@ -1,12 +1,6 @@
 ---
 title: "EpiXprSData"
-author:
-- name: Ian Loveless, MS
-  affiliation: 
-  - Center for Bioinformatics, Department of Public Health Sciences, Henry Ford
-  Health System, Detroit, MI, U.S.A.
-  email: ilovele1@hfhs.org
-package: curatedMetagenomicData
+author: "Ian Loveless"
 output: rmarkdown::html_vignette
 vignette: >
   %\VignetteIndexEntry{EpiXprSData}
@@ -21,9 +15,14 @@ knitr::opts_chunk$set(
   comment = "#>"
 )
 ```
-
+# Loading Data
+Data can be loaded separately, but is intended to be utilized in the 
+\code{EpiXprS} package. 
 
 
 ```{r setup}
-library(EpiXprS.Data)
+library(ExperimentHub)
+eh = ExperimentHub()
+x <- query(eh, c('EpiXprS','PRAD'))
+
 ```
