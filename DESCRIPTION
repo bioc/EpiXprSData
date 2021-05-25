@@ -15,10 +15,10 @@ Description: Models constructed on paired DNA methylation and gene expression
     the EpiXprS Bioconductor package. 
 License: What license is it under?
 Encoding: UTF-8
-LazyData: true
 biocViews:
-    ExperimentHub,
+    ExperimentHubSoftware,
     Homo_sapiens_Data,
+    RNASeqData
 Depends:
     R (>= 4.1)
 RoxygenNote: 7.1.1
