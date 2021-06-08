@@ -2,7 +2,7 @@ Package: EpiXprSData
 Type: Package
 Title: Tissue Specific Gene Expression Prediction Models Constructed 
     From Paired DNA Methylation and RNA Counts
-Version: 0.99.0
+Version: 0.99.1
 Authors@R:
     c(person(given = "Ian", family = "Loveless", role = c("aut", "cre"),
              email = "ilovele1@hfhs.org",
@@ -13,7 +13,7 @@ Description: Models constructed on paired DNA methylation and gene expression
     counts for the purpose of predicting expression in samples with only DNA
     methylation. This data package is designed to be used in conjunction with 
     the EpiXprS Bioconductor package. 
-License: MIT + file LICENSE
+License: Artistic-2.0
 Encoding: UTF-8
 biocViews:
     ExperimentHub,

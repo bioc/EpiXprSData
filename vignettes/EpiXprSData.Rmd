@@ -21,6 +21,7 @@ Data can be loaded separately, but is intended to be utilized in the
 
 
 ```{r setup}
+sessionInfo()
 library(ExperimentHub)
 eh = ExperimentHub()
 x <- query(eh, c('EpiXprS','PRAD'))
